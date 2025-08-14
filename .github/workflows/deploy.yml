@@ -1,0 +1,59 @@
+name: Build & Deploy Next.js with Podman (self-hosted, no registry)
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+env:
+  APP_DIR: /srv/nextapp
+  IMAGE_NAME: nextapp
+  IMAGE_TAG: ${{ github.sha }}
+  CONTAINER_NAME: nextapp
+  RUN_PORT: "3003:3003"   # host:container
+
+jobs:
+  deploy:
+    runs-on: self-hosted
+    # labels: [ "homelab" ]  # uncomment if your runner uses labels
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Ensure app dir exists
+        run: mkdir -p "$APP_DIR"
+
+      - name: Sync repo to persistent build dir (preserve layer cache)
+        run: rsync -a --delete "$GITHUB_WORKSPACE"/ "$APP_DIR"/
+
+      - name: Podman version (debug)
+        run: podman version
+
+      - name: Build image (tag by commit SHA + latest)
+        working-directory: ${{ env.APP_DIR }}
+        run: |
+          podman build --pull-always \
+            -t "${IMAGE_NAME}:${IMAGE_TAG}" \
+            -t "${IMAGE_NAME}:latest" .
+
+      - name: Stop & remove existing container (if any)
+        run: podman rm -f "${CONTAINER_NAME}" || true
+
+      - name: Run/refresh container
+        run: |
+          # If you have runtime envs, mount an env file:
+          #   --env-file /srv/nextapp/.env.production \
+          podman run -d \
+            --name "${CONTAINER_NAME}" \
+            --restart=always \
+            -p "${RUN_PORT}" \
+            "${IMAGE_NAME}:latest"
+
+      - name: Prune dangling images
+        run: podman image prune -f
+
+      - name: Keep last 3 images for this app (drop older than 3)
+        run: |
+          podman images "${IMAGE_NAME}" --filter "dangling=false" --format '{{.ID}} {{.Tag}}' \
+          | awk '$2!="latest"{print $1}' \
+          | tail -n +4 | xargs -r podman rmi
